@@ -408,6 +408,38 @@ pub fn render_target(width: u32, height: u32) -> RenderTarget {
     }
 }
 
+pub fn depth_render_target(width: u32, height: u32) -> RenderTarget {
+    let context = get_context();
+
+    let texture_id = get_quad_context().new_render_texture(miniquad::TextureParams {
+        width,
+        height,
+        ..Default::default()
+    });
+
+    let depth_texture_id = get_quad_context().new_render_texture(miniquad::TextureParams {
+        width,
+        height,
+        format: miniquad::TextureFormat::Depth32,
+        ..Default::default()
+    });
+
+    let texture = Texture2D {
+        texture: context.textures.store_texture(texture_id),
+    };
+
+    let depth_texture = Texture2D {
+        texture: context.textures.store_texture(depth_texture_id),
+    };
+
+    let render_pass = render_pass(texture.clone(), Some(depth_texture));
+
+    RenderTarget {
+        texture,
+        render_pass,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DrawTextureParams {
     pub dest_size: Option<Vec2>,
