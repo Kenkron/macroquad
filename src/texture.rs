@@ -451,9 +451,12 @@ pub fn render_target_3d(width: u32, height: u32) -> RenderTarget {
     let depth_texture = Texture2D {
         texture: context.textures.store_texture(depth_texture_id),
     };
-
-    let render_pass = render_pass(texture.clone(), Some(depth_texture));
-
+    let render_pass = get_quad_context().new_render_pass_mrt(&[texture_id], None, None);
+    let render_pass = RenderPass {
+        color_texture: texture.clone(),
+        depth_texture: Some(depth_texture.clone()),
+        render_pass: Arc::new(render_pass),
+    };
     RenderTarget {
         texture,
         render_pass,
