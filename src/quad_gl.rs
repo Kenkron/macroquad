@@ -2,11 +2,13 @@
 
 use miniquad::*;
 
-pub use miniquad::{FilterMode, TextureId as MiniquadTexture};
+pub use miniquad::{FilterMode, TextureId as MiniquadTexture, UniformDesc};
 
-use crate::{color::Color, logging::warn, telemetry, texture::Texture2D, Error};
+use crate::{color::Color, logging::warn, telemetry, texture::Texture2D, tobytes::ToBytes, Error};
 
 use std::collections::BTreeMap;
+
+pub(crate) use crate::models::Vertex;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DrawMode {
@@ -35,60 +37,6 @@ struct DrawCall {
     uniforms: Option<Vec<u8>>,
     render_pass: Option<RenderPass>,
     capture: bool,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Vertex {
-    pos: [f32; 3],
-    uv: [f32; 2],
-    color: [u8; 4],
-}
-
-pub type VertexInterop = ([f32; 3], [f32; 2], [f32; 4]);
-
-impl Into<VertexInterop> for Vertex {
-    fn into(self) -> VertexInterop {
-        (
-            self.pos,
-            self.uv,
-            [
-                self.color[0] as f32 / 255.0,
-                self.color[1] as f32 / 255.0,
-                self.color[2] as f32 / 255.0,
-                self.color[3] as f32 / 255.0,
-            ],
-        )
-    }
-}
-impl Into<Vertex> for VertexInterop {
-    fn into(self) -> Vertex {
-        Vertex {
-            pos: self.0,
-            uv: self.1,
-            color: [
-                ((self.2)[0] * 255.) as u8,
-                ((self.2)[1] * 255.) as u8,
-                ((self.2)[2] * 255.) as u8,
-                ((self.2)[3] * 255.) as u8,
-            ],
-        }
-    }
-}
-
-impl Vertex {
-    pub fn new(x: f32, y: f32, z: f32, u: f32, v: f32, color: Color) -> Vertex {
-        Vertex {
-            pos: [x, y, z],
-            uv: [u, v],
-            color: [
-                (color.r * 255.) as u8,
-                (color.g * 255.) as u8,
-                (color.b * 255.) as u8,
-                (color.a * 255.) as u8,
-            ],
-        }
-    }
 }
 
 impl DrawCall {
@@ -198,10 +146,6 @@ mod snapshotter_shader {
             uniforms: UniformBlockLayout { uniforms: vec![] },
         }
     }
-
-    #[repr(C)]
-    #[derive(Debug)]
-    pub struct Uniforms {}
 }
 
 impl MagicSnapshotter {
@@ -350,6 +294,7 @@ struct Uniform {
     name: String,
     uniform_type: UniformType,
     byte_offset: usize,
+    byte_size: usize,
 }
 
 #[derive(Clone)]
@@ -387,6 +332,10 @@ impl PipelineExt {
             );
             return;
         }
+        if uniform_byte_size != uniform_meta.byte_size {
+            warn!("set_uniform do not support uniform arrays");
+            return;
+        }
         macro_rules! transmute_uniform {
             ($uniform_size:expr, $byte_offset:expr, $n:expr) => {
                 if $uniform_size == $n {
@@ -403,6 +352,35 @@ impl PipelineExt {
         transmute_uniform!(uniform_byte_size, uniform_byte_offset, 12);
         transmute_uniform!(uniform_byte_size, uniform_byte_offset, 16);
         transmute_uniform!(uniform_byte_size, uniform_byte_offset, 64);
+    }
+
+    fn set_uniform_array<T: ToBytes>(&mut self, name: &str, uniform: &[T]) {
+        let uniform_meta = self.uniforms.iter().find(
+            |Uniform {
+                 name: uniform_name, ..
+             }| uniform_name == name,
+        );
+        if uniform_meta.is_none() {
+            warn!("Trying to set non-existing uniform: {}", name);
+            return;
+        }
+        let uniform_meta = uniform_meta.unwrap();
+        let uniform_byte_size = uniform_meta.byte_size;
+        let uniform_byte_offset = uniform_meta.byte_offset;
+
+        let data = uniform.to_bytes();
+        if data.len() != uniform_byte_size {
+            warn!(
+                "Trying to set uniform {} sized {} bytes value of {} bytes",
+                name,
+                uniform_byte_size,
+                std::mem::size_of::<T>()
+            );
+            return;
+        }
+        for i in 0..uniform_byte_size {
+            self.uniforms_data[uniform_byte_offset + i] = data[i];
+        }
     }
 }
 
@@ -513,7 +491,7 @@ impl PipelinesStorage {
         shader: ShaderId,
         params: PipelineParams,
         wants_screen_texture: bool,
-        mut uniforms: Vec<(String, UniformType)>,
+        mut uniforms: Vec<UniformDesc>,
         textures: Vec<String>,
     ) -> GlPipeline {
         let pipeline = ctx.new_pipeline(
@@ -522,6 +500,7 @@ impl PipelinesStorage {
                 VertexAttribute::new("position", VertexFormat::Float3),
                 VertexAttribute::new("texcoord", VertexFormat::Float2),
                 VertexAttribute::new("color0", VertexFormat::Byte4),
+                VertexAttribute::new("normal", VertexFormat::Float4),
             ],
             shader,
             params,
@@ -536,19 +515,20 @@ impl PipelinesStorage {
         let mut max_offset = 0;
 
         for (name, kind) in shader::uniforms().into_iter().rev() {
-            uniforms.insert(0, (name.to_owned(), kind));
+            uniforms.insert(0, UniformDesc::new(name, kind));
         }
 
         let uniforms = uniforms
             .iter()
             .scan(0, |offset, uniform| {
-                let uniform_byte_size = uniform.1.size();
+                let byte_size = uniform.uniform_type.size() * uniform.array_count;
                 let uniform = Uniform {
-                    name: uniform.0.clone(),
-                    uniform_type: uniform.1,
+                    name: uniform.name.clone(),
+                    uniform_type: uniform.uniform_type,
+                    byte_size,
                     byte_offset: *offset,
                 };
-                *offset += uniform_byte_size;
+                *offset += byte_size;
                 max_offset = *offset;
 
                 Some(uniform)
@@ -635,16 +615,13 @@ impl QuadGl {
         ctx: &mut dyn miniquad::RenderingBackend,
         shader: miniquad::ShaderSource,
         params: PipelineParams,
-        uniforms: Vec<(String, UniformType)>,
+        uniforms: Vec<UniformDesc>,
         textures: Vec<String>,
     ) -> Result<GlPipeline, Error> {
         let mut shader_meta: ShaderMeta = shader::meta();
 
         for uniform in &uniforms {
-            shader_meta
-                .uniforms
-                .uniforms
-                .push(UniformDesc::new(&uniform.0, uniform.1));
+            shader_meta.uniforms.uniforms.push(uniform.clone());
         }
 
         for texture in &textures {
@@ -890,7 +867,7 @@ impl QuadGl {
         self.state.draw_mode = mode;
     }
 
-    pub fn geometry(&mut self, vertices: &[impl Into<VertexInterop> + Copy], indices: &[u16]) {
+    pub fn geometry(&mut self, vertices: &[Vertex], indices: &[u16]) {
         if vertices.len() >= self.max_vertices || indices.len() >= self.max_indices {
             warn!("geometry() exceeded max drawcall size, clamping");
         }
@@ -961,7 +938,7 @@ impl QuadGl {
         let dc = &mut self.draw_calls[self.draw_calls_count - 1];
 
         for i in 0..vertices.len() {
-            dc.vertices[dc.vertices_count + i] = vertices[i].into().into();
+            dc.vertices[dc.vertices_count + i] = vertices[i];
         }
 
         for i in 0..indices.len() {
@@ -982,6 +959,18 @@ impl QuadGl {
         self.pipelines
             .get_quad_pipeline_mut(pipeline)
             .set_uniform(name, uniform);
+    }
+    pub fn set_uniform_array<T: ToBytes>(
+        &mut self,
+        pipeline: GlPipeline,
+        name: &str,
+        uniform: &[T],
+    ) {
+        self.state.break_batching = true;
+
+        self.pipelines
+            .get_quad_pipeline_mut(pipeline)
+            .set_uniform_array(name, uniform);
     }
 
     pub fn set_texture(&mut self, pipeline: GlPipeline, name: &str, texture: Texture2D) {
@@ -1044,6 +1033,7 @@ mod shader {
     attribute vec3 position;
     attribute vec2 texcoord;
     attribute vec4 color0;
+    attribute vec4 normal;
 
     varying lowp vec2 uv;
     varying lowp vec4 color;

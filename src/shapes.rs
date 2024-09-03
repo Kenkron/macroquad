@@ -75,8 +75,14 @@ pub fn draw_rectangle_lines(x: f32, y: f32, w: f32, h: f32, thickness: f32, colo
     context.gl.geometry(&vertices, &indices);
 }
 
-
-pub fn draw_rectangle_lines_ex(x: f32, y: f32, w: f32, h: f32, thickness: f32, params: DrawRectangleParams ) {
+pub fn draw_rectangle_lines_ex(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    thickness: f32,
+    params: DrawRectangleParams,
+) {
     let context = get_context();
     let tx = thickness / w;
     let ty = thickness / h;
@@ -239,21 +245,7 @@ pub fn draw_poly_lines(
     thickness: f32,
     color: Color,
 ) {
-    let rot = rotation.to_radians();
-
-    for i in 0..sides {
-        let rx = (i as f32 / sides as f32 * std::f32::consts::PI * 2. + rot).cos();
-        let ry = (i as f32 / sides as f32 * std::f32::consts::PI * 2. + rot).sin();
-
-        let p0 = vec2(x + radius * rx, y + radius * ry);
-
-        let rx = ((i + 1) as f32 / sides as f32 * std::f32::consts::PI * 2. + rot).cos();
-        let ry = ((i + 1) as f32 / sides as f32 * std::f32::consts::PI * 2. + rot).sin();
-
-        let p1 = vec2(x + radius * rx, y + radius * ry);
-
-        draw_line(p0.x, p0.y, p1.x, p1.y, thickness, color);
-    }
+    draw_arc(x, y, sides, radius, rotation, thickness, 360.0, color);
 }
 
 /// Draws a solid circle centered at `[x, y]` with a given radius `r` and `color`.
@@ -263,7 +255,7 @@ pub fn draw_circle(x: f32, y: f32, r: f32, color: Color) {
 
 /// Draws a circle outline centered at `[x, y]` with a given radius, line `thickness` and `color`.
 pub fn draw_circle_lines(x: f32, y: f32, r: f32, thickness: f32, color: Color) {
-    draw_poly_lines(x, y, 20, r, 0., thickness, color);
+    draw_poly_lines(x, y, 30, r, 0., thickness, color);
 }
 
 /// Draws a solid ellipse centered at `[x, y]` with a given size `[w, h]`,
@@ -369,4 +361,52 @@ pub fn draw_line(x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: Colo
         ],
         &[0, 1, 2, 2, 1, 3],
     );
+}
+
+/// Draw arc from `rotation`(in degrees) to `arc + rotation` (`arc` in degrees),
+/// centered at `[x, y]` with a given number of `sides`, `radius`, line `thickness`, and `color`.
+pub fn draw_arc(
+    x: f32,
+    y: f32,
+    sides: u8,
+    radius: f32,
+    rotation: f32,
+    thickness: f32,
+    arc: f32,
+    color: Color,
+) {
+    let rot = rotation.to_radians();
+    let part = arc.to_radians();
+
+    let sides = (sides as f32 * part / std::f32::consts::TAU)
+        .ceil()
+        .max(1.0);
+    let span = part / sides;
+    let sides = sides as usize;
+
+    let context = get_context();
+    context.gl.texture(None);
+    context.gl.draw_mode(DrawMode::Triangles);
+
+    let mut verticies = Vec::<Vertex>::with_capacity(sides * 2);
+    let mut indicies = Vec::<u16>::with_capacity(sides * 2);
+
+    for i in 0..sides {
+        let start_angle = i as f32 * span + rot;
+        let end_angle = start_angle + span;
+
+        indicies.extend([0, 1, 2, 2, 1, 3].map(|k| k + (verticies.len() as u16)));
+
+        for (angle, radius) in [
+            (start_angle, radius),
+            (start_angle, radius + thickness),
+            (end_angle, radius),
+            (end_angle, radius + thickness),
+        ] {
+            let point = Vec2::new(x, y) + radius * Vec2::from_angle(angle);
+            verticies.push(Vertex::new(point.x, point.y, 0., 0., 0., color));
+        }
+    }
+
+    context.gl.geometry(&verticies, &indicies);
 }

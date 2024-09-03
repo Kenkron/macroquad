@@ -351,17 +351,6 @@ pub struct RenderPass {
 }
 
 impl RenderPass {
-    fn new(color_texture: Texture2D, depth_texture: Option<Texture2D>) -> RenderPass {
-        let render_pass = get_quad_context().new_render_pass(
-            color_texture.raw_miniquad_id(),
-            depth_texture.as_ref().map(|t| t.raw_miniquad_id()),
-        );
-        RenderPass {
-            color_texture,
-            depth_texture: depth_texture.map(|t| t.clone()),
-            render_pass: Arc::new(render_pass),
-        }
-    }
     /// Returns the miniquad handle for this render pass.
     pub fn raw_miniquad_id(&self) -> miniquad::RenderPass {
         *self.render_pass
@@ -383,24 +372,55 @@ pub struct RenderTarget {
     pub render_pass: RenderPass,
 }
 
-fn render_pass(color_texture: Texture2D, depth_texture: Option<Texture2D>) -> RenderPass {
-    RenderPass::new(color_texture, depth_texture)
-}
-
 pub fn render_target(width: u32, height: u32) -> RenderTarget {
     let context = get_context();
-
     let texture_id = get_quad_context().new_render_texture(miniquad::TextureParams {
         width,
         height,
         ..Default::default()
     });
-
+    let render_pass = get_quad_context().new_render_pass_mrt(&[texture_id], None, None);
     let texture = Texture2D {
         texture: context.textures.store_texture(texture_id),
     };
+    let render_pass = RenderPass {
+        color_texture: texture.clone(),
+        depth_texture: None,
+        render_pass: Arc::new(render_pass),
+    };
+    RenderTarget {
+        texture,
+        render_pass,
+    }
+}
 
-    let render_pass = render_pass(texture.clone(), None);
+pub fn render_target_msaa(width: u32, height: u32, sample_count: i32) -> RenderTarget {
+    let context = get_context();
+
+    let color_texture = get_quad_context().new_render_texture(miniquad::TextureParams {
+        width,
+        height,
+        sample_count,
+        ..Default::default()
+    });
+    let color_resolve_texture = get_quad_context().new_render_texture(miniquad::TextureParams {
+        width,
+        height,
+        ..Default::default()
+    });
+    let render_pass = get_quad_context().new_render_pass_mrt(
+        &[color_texture],
+        Some(&[color_resolve_texture]),
+        None,
+    );
+    let texture = Texture2D {
+        texture: context.textures.store_texture(color_resolve_texture),
+    };
+    let render_pass = RenderPass {
+        color_texture: texture.clone(),
+        depth_texture: None,
+        render_pass: Arc::new(render_pass),
+    };
 
     RenderTarget {
         texture,
@@ -681,7 +701,13 @@ impl Texture2D {
         let height = img.height() as u16;
         let bytes = img.into_raw();
 
-        Self::from_rgba8(width, height, &bytes)
+        let t = Self::from_rgba8(width, height, &bytes);
+
+        let ctx = get_context();
+
+        t.set_filter(ctx.default_filter_mode);
+
+        t
     }
 
     /// Creates a Texture2D from an [Image].
@@ -913,4 +939,20 @@ pub fn build_textures_atlas() {
     let texture = context.texture_batcher.atlas.texture();
     let (w, h) = get_quad_context().texture_size(texture);
     crate::telemetry::log_string(&format!("Atlas: {} {}", w, h));
+}
+
+#[doc(hidden)]
+/// Macroquad do not have track of all loaded fonts.
+/// Fonts store their characters as ID's in the atlas.
+/// There fore resetting the atlas will render all fonts unusable.
+pub unsafe fn reset_textures_atlas() {
+    let context = get_context();
+    context.fonts_storage = crate::text::FontsStorage::new(&mut *context.quad_context);
+    context.texture_batcher = Batcher::new(&mut *context.quad_context);
+}
+
+pub fn set_default_filter_mode(filter: FilterMode) {
+    let context = get_context();
+
+    context.default_filter_mode = filter;
 }

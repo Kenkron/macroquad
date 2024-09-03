@@ -44,6 +44,7 @@ use std::pin::Pin;
 
 mod exec;
 mod quad_gl;
+mod tobytes;
 
 pub mod audio;
 pub mod camera;
@@ -223,7 +224,10 @@ struct Context {
 
     quad_context: Box<dyn miniquad::RenderingBackend>,
 
+    default_filter_mode: crate::quad_gl::FilterMode,
     textures: crate::texture::TexturesContext,
+
+    update_on: conf::UpdateTrigger,
 }
 
 #[derive(Clone)]
@@ -349,7 +353,10 @@ impl Context {
             recovery_future: None,
 
             quad_context: ctx,
+
+            default_filter_mode: crate::quad_gl::FilterMode::Linear,
             textures: crate::texture::TexturesContext::new(),
+            update_on: Default::default(),
         }
     }
 
@@ -495,6 +502,10 @@ impl EventHandler for Stage {
         let _z = telemetry::ZoneGuard::new("Event::resize_event");
         get_context().screen_width = width;
         get_context().screen_height = height;
+
+        if miniquad::window::blocking_event_loop() {
+            miniquad::window::schedule_update();
+        }
     }
 
     fn raw_mouse_motion(&mut self, x: f32, y: f32) {
@@ -525,6 +536,10 @@ impl EventHandler for Stage {
                 .iter_mut()
                 .for_each(|arr| arr.push(MiniquadInputEvent::MouseMotion { x, y }));
         }
+
+        if context.update_on.mouse_motion {
+            miniquad::window::schedule_update();
+        }
     }
 
     fn mouse_wheel_event(&mut self, x: f32, y: f32) {
@@ -537,6 +552,10 @@ impl EventHandler for Stage {
             .input_events
             .iter_mut()
             .for_each(|arr| arr.push(MiniquadInputEvent::MouseWheel { x, y }));
+
+        if context.update_on.mouse_wheel {
+            miniquad::window::schedule_update();
+        }
     }
 
     fn mouse_button_down_event(&mut self, btn: MouseButton, x: f32, y: f32) {
@@ -554,7 +573,7 @@ impl EventHandler for Stage {
             context.mouse_position = Vec2::new(x, y);
         }
 
-        if miniquad::window::blocking_event_loop() {
+        if context.update_on.mouse_down {
             miniquad::window::schedule_update();
         }
     }
@@ -573,7 +592,7 @@ impl EventHandler for Stage {
         if !context.cursor_grabbed {
             context.mouse_position = Vec2::new(x, y);
         }
-        if miniquad::window::blocking_event_loop() {
+        if context.update_on.mouse_up {
             miniquad::window::schedule_update();
         }
     }
@@ -602,6 +621,8 @@ impl EventHandler for Stage {
             if phase == TouchPhase::Moved {
                 self.mouse_motion_event(x, y);
             }
+        } else if context.update_on.touch {
+            miniquad::window::schedule_update();
         };
 
         context
@@ -639,7 +660,12 @@ impl EventHandler for Stage {
                 repeat,
             })
         });
-        if miniquad::window::blocking_event_loop() {
+        if context
+            .update_on
+            .specific_key
+            .as_ref()
+            .map_or(context.update_on.key_down, |keys| keys.contains(&keycode))
+        {
             miniquad::window::schedule_update();
         }
     }
@@ -655,7 +681,7 @@ impl EventHandler for Stage {
             .for_each(|arr| arr.push(MiniquadInputEvent::KeyUp { keycode, modifiers }));
 
         if miniquad::window::blocking_event_loop() {
-            miniquad::window::schedule_update();
+            //miniquad::window::schedule_update();
         }
     }
 
@@ -739,6 +765,10 @@ impl EventHandler for Stage {
     fn window_restored_event(&mut self) {
         #[cfg(target_os = "android")]
         get_context().audio_context.resume();
+        #[cfg(target_os = "android")]
+        if miniquad::window::blocking_event_loop() {
+            miniquad::window::schedule_update();
+        }
     }
 
     fn window_minimized_event(&mut self) {
@@ -755,6 +785,50 @@ impl EventHandler for Stage {
     }
 }
 
+pub mod conf {
+    #[derive(Default, Debug)]
+    pub struct UpdateTrigger {
+        pub key_down: bool,
+        pub mouse_down: bool,
+        pub mouse_up: bool,
+        pub mouse_motion: bool,
+        pub mouse_wheel: bool,
+        pub specific_key: Option<Vec<crate::KeyCode>>,
+        pub touch: bool,
+    }
+
+    #[derive(Debug)]
+    pub struct Conf {
+        pub miniquad_conf: miniquad::conf::Conf,
+        /// With miniquad_conf.platform.blocking_event_loop = true,
+        /// next_frame().await will never finish and will wait forever with
+        /// zero CPU usage.
+        /// update_on will tell macroquad when to proceed with the event loop.
+        pub update_on: Option<UpdateTrigger>,
+        pub default_filter_mode: crate::FilterMode,
+    }
+
+    impl Default for Conf {
+        fn default() -> Self {
+            Self {
+                miniquad_conf: miniquad::conf::Conf::default(),
+                update_on: Some(UpdateTrigger::default()),
+                default_filter_mode: crate::FilterMode::Linear,
+            }
+        }
+    }
+}
+
+impl From<miniquad::conf::Conf> for conf::Conf {
+    fn from(conf: miniquad::conf::Conf) -> conf::Conf {
+        conf::Conf {
+            miniquad_conf: conf,
+            update_on: None,
+            default_filter_mode: crate::FilterMode::Linear,
+        }
+    }
+}
+
 /// Not meant to be used directly, only from the macro.
 #[doc(hidden)]
 pub struct Window {}
@@ -763,21 +837,31 @@ impl Window {
     pub fn new(label: &str, future: impl Future<Output = ()> + 'static) {
         Window::from_config(
             conf::Conf {
-                window_title: label.to_string(),
-                //high_dpi: true,
+                miniquad_conf: miniquad::conf::Conf {
+                    window_title: label.to_string(),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             future,
         );
     }
 
-    pub fn from_config(config: conf::Conf, future: impl Future<Output = ()> + 'static) {
-        miniquad::start(config, move || {
+    pub fn from_config(config: impl Into<conf::Conf>, future: impl Future<Output = ()> + 'static) {
+        let conf::Conf {
+            miniquad_conf,
+            update_on,
+            default_filter_mode,
+        } = config.into();
+        miniquad::start(miniquad_conf, move || {
             thread_assert::set_thread_id();
             unsafe {
                 MAIN_FUTURE = Some(Box::pin(future));
             }
-            unsafe { CONTEXT = Some(Context::new()) };
+            let mut context = Context::new();
+            context.update_on = update_on.unwrap_or_default();
+            context.default_filter_mode = default_filter_mode;
+            unsafe { CONTEXT = Some(context) };
 
             Box::new(Stage {})
         });

@@ -160,7 +160,7 @@ pub struct Camera3D {
     pub target: Vec3,
     /// Camera up vector (rotation over its axis).
     pub up: Vec3,
-    /// Camera field-of-view aperture in Y (degrees)
+    /// Camera field-of-view aperture in Y (radians)
     /// in perspective, used as near plane width in orthographic.
     pub fovy: f32,
     /// Screen aspect ratio.
@@ -192,7 +192,7 @@ impl Default for Camera3D {
             target: vec3(0., 0., 0.),
             aspect: None,
             up: vec3(0., 0., 1.),
-            fovy: 45.,
+            fovy: 45.0_f32.to_radians(),
             projection: Projection::Perspective,
             render_target: None,
             viewport: None,
