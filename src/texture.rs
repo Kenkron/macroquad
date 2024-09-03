@@ -408,7 +408,7 @@ pub fn render_target(width: u32, height: u32) -> RenderTarget {
     }
 }
 
-pub fn depth_render_target(width: u32, height: u32) -> RenderTarget {
+pub fn render_target_3d(width: u32, height: u32) -> RenderTarget {
     let context = get_context();
 
     let texture_id = get_quad_context().new_render_texture(miniquad::TextureParams {
