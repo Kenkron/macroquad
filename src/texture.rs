@@ -347,7 +347,7 @@ pub async fn load_texture(path: &str) -> Result<Texture2D, Error> {
 pub struct RenderPass {
     pub color_texture: Texture2D,
     pub depth_texture: Option<Texture2D>,
-    pub(crate) render_pass: Arc<miniquad::RenderPass>,
+    pub render_pass: Arc<miniquad::RenderPass>,
 }
 
 impl RenderPass {
